@@ -1,12 +1,15 @@
 import sys
 sys.path.append("../")
+sys.path.insert(0, '../KE-GCN/')
 import copy
-import torch
-from torch.utils.data import random_split
-from torch.utils.tensorboard import SummaryWriter
-from dgl.contrib.data import load_data
+# from torch.utils.data import random_split
+# from torch.utils.tensorboard import SummaryWriter
+# from dgl.contrib.data import load_data
 import numpy as np
 from RGCN.model import Model
+from models import AutoRGCN_Align
+from metrics import *
+from utils import *
 from server import Server
 from client import Client
 import argparse
@@ -50,7 +53,6 @@ def init_logger(args):
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] | %(message)s')
     console.setFormatter(formatter)
     logging.getLogger('').addHandler(console)
-
 
 # init FL setting
 def init_fed(args):
@@ -119,6 +121,126 @@ def init_fed(args):
     
     return server, clients
 
+def classification(args):
+    '''
+    code for entity classification task
+    '''
+    # Settings
+    flags = tf.app.flags
+    FLAGS = flags.FLAGS
+    flags.DEFINE_string('dataset', 'wordnet', 'Dataset: am, wordnet.')
+    flags.DEFINE_string('mode', 'None', 'KE method for GCN: TransE, TransH, TransD, DistMult, RotatE, QuatE')
+    flags.DEFINE_string('optim', 'Adam', 'Optimizer: GD, Adam')
+    flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
+    flags.DEFINE_integer('epochs', 500, 'Number of epochs to train.')
+    flags.DEFINE_float('dropout', 0., 'Dropout rate (1 - keep probability).')
+    flags.DEFINE_float('gamma', 3.0, 'Hyper-parameter for margin based loss.')
+    flags.DEFINE_integer('num_negs', 5, 'Number of negative samples for each positive seed.')
+    flags.DEFINE_float('alpha', 0.5, 'Weight of entity conv update.')
+    flags.DEFINE_float('beta', 0.5, 'Weight of relation conv update.')
+    flags.DEFINE_integer('layer', 0, 'number of hidden layers')
+    flags.DEFINE_integer('dim', 32, 'hidden Dimension')
+    flags.DEFINE_integer('randomseed', 12306, 'seed for randomness')
+    flags.DEFINE_boolean('rel_update', False, 'If true, use graph conv for rel update.')
+    flags.DEFINE_boolean('valid', False, 'If true, split validation data.')
+    flags.DEFINE_boolean('save', False, 'If true, save the print')
+    flags.DEFINE_string('metric', "cityblock", 'metric for testing')
+    flags.DEFINE_string('loss_mode', "L1", 'mode for loss calculation')
+    flags.DEFINE_string('embed', "random", 'init embedding for entities')
+    flags.DEFINE_string('run_mode', "Single", 'initial run mode')
+
+    np.random.seed(FLAGS.randomseed)
+    random.seed(FLAGS.randomseed)
+    tf.set_random_seed(FLAGS.randomseed)
+
+    if FLAGS.save:
+        nsave = "../log/{}/{}".format(FLAGS.dataset, FLAGS.mode)
+    else:
+        print("not saving file")
+        nsave = "log/trash"
+    create_exp_dir(nsave)
+    log_format = '%(asctime)s %(message)s'
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+        format=log_format, datefmt='%m/%d %I:%M:%S %p', filemode="w")
+    save_fname = 'alpha{}-beta{}-layer{}-sdim{}-lr{}-seed{}'.format(
+                FLAGS.alpha, FLAGS.beta, FLAGS.layer, FLAGS.dim,
+                FLAGS.learning_rate, FLAGS.randomseed)
+
+    save_fname = "auto-" + save_fname
+    if not FLAGS.valid:
+        save_fname = "test-" + save_fname
+    fh = logging.FileHandler(os.path.join(nsave, save_fname + ".txt"), "w")
+    fh.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(fh)
+    logging.getLogger().setLevel(logging.INFO)
+
+    # Load data
+    adj, num_ent, train, test, valid, y = load_data_class(FLAGS)
+    data = {"train": train, "test": test, "valid": valid, "y": y}
+
+
+    train = [train, y]
+    rel_num = np.max(adj[2][:, 1]) + 1
+    print("Relation num: ", rel_num)
+
+    # process graph to fit into later computation
+    support = [preprocess_adj(adj)]
+    data["support"] = support
+    num_supports = 1
+    model_func = AutoRGCN_Align
+    num_negs = FLAGS.num_negs
+    class_num = y.shape[1]
+    print("Entity num: ", num_ent)
+    print("Class num: ", class_num)
+
+    if FLAGS.dataset == "fb15k":
+        task = "label"
+        get_eval = get_label
+    else:
+        task = "class"
+        get_eval = get_class
+
+    # Define placeholders
+    placeholders = {
+        'features': tf.placeholder(tf.float32),
+        'dropout': tf.placeholder_with_default(0., shape=()),
+        'num_features_nonzero': tf.placeholder_with_default(0, shape=())
+    }
+    placeholders['support'] = [[tf.placeholder(tf.float32, shape=[None, 1]),
+                        tf.placeholder(tf.float32, shape=[None, 1]), \
+                        tf.placeholder(tf.int32)] for _ in range(num_supports)]
+
+    # Create model
+    input_dim = [num_ent, rel_num]
+    hidden_dim = [FLAGS.dim, FLAGS.dim]
+    output_dim = [class_num, FLAGS.dim]
+    if FLAGS.mode == "TransH":
+        hidden_dim[1] *= 2
+    elif FLAGS.mode == "TransD":
+        hidden_dim[0] *= 2
+        hidden_dim[1] *= 2
+
+    # init the roles of FL
+    # 1.init server
+    ser_model =  model_func(placeholders, input_dim, hidden_dim, output_dim, dataset=FLAGS.dataset,
+                        train_labels=train, mode=FLAGS.mode, embed=FLAGS.embed, alpha=FLAGS.alpha,
+                        beta=FLAGS.beta, layer_num=FLAGS.layer, sparse_inputs=False, featureless=True,
+                        logging=True, rel_update=FLAGS.rel_update, task=task)
+
+    server = Server(ser_model, args.gpu, logging)
+    # 2.init clients
+    clients = []
+    for i in range(args.num_client):
+        model =  model_func(placeholders, input_dim, hidden_dim, output_dim, dataset=FLAGS.dataset,
+                        train_labels=train, mode=FLAGS.mode, embed=FLAGS.embed, alpha=FLAGS.alpha,
+                        beta=FLAGS.beta, layer_num=FLAGS.layer, sparse_inputs=False, featureless=True,
+                        logging=True, rel_update=FLAGS.rel_update, task=task)
+
+        client = Client(i, data, model, FLAGS, args.local_epoch, args.lr, args.l2norm, args.state_dir + "Single" + "/", logging, get_eval)
+        clients.append(client)
+    
+    return server, clients
+
 
 # FL process
 def FedRunning(args, server, clients):
@@ -155,21 +277,23 @@ def FedRunning(args, server, clients):
 # Single client run on local device
 def SingleRunning(args, server, clients):
 
+    print ("ENTERED")
     for client in np.array(clients):
         client.getParame(*server.sendParame())
 
     for t in range(args.round):
+        print(t)
 
         logging.info(f"---------------------Round {t}---------------------")
         for client in np.array(clients):
             client.train()
     
     logging.info(f"--------------------Finally Test--------------------")
-    test_acc = 0
-    for client in np.array(clients):
-        test_acc += client.test()
-    test_acc /= len(clients)
-    logging.info("Clients Test Avg Acc: {:>8f}".format(test_acc))
+    # test_acc = 0
+    # for client in np.array(clients):
+    #     test_acc += client.test()
+    # test_acc /= len(clients)
+    # logging.info("Clients Test Avg Acc: {:>8f}".format(test_acc))
 
 
 # Entire data will be run together
@@ -227,19 +351,21 @@ if __name__ == "__main__":
     args_str = json.dumps(vars(args))
 
     # args.gpu = torch.device('cuda:' + args.gpu)
-    args.gpu = torch.device('cpu')
+    # args.gpu = torch.device('cpu')
 
     # set random seed
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    # torch.manual_seed(args.seed)
+    # torch.cuda.manual_seed(args.seed)
+    random.seed(args.seed)
+    tf.set_random_seed(args.seed)
 
     # create directories
     init_dir(args)
 
     # init writer
-    writer = SummaryWriter(args.tb_log_dir + args.run_mode + "/")
-    args.writer = writer
+    # writer = SummaryWriter(args.tb_log_dir + args.run_mode + "/")
+    # args.writer = writer
 
     # init logger
     init_logger(args)
@@ -252,8 +378,11 @@ if __name__ == "__main__":
         FedRunning(args, server, clients)
     elif args.run_mode == 'Single':
         # init FL setting
-        server, clients = init_fed(args)
+        # server, clients = init_fed(args)
+        print("SINGLE_ENTERED")
+        server, clients = classification(args)
         # running
+        print("SINGLE RUNNING")
         SingleRunning(args, server, clients)
     elif args.run_mode == 'Entire':
         EntireRunning(args)

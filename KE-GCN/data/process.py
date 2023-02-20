@@ -179,8 +179,88 @@ def process_fb():
     with open('class/fb15kpro.pickle', 'wb') as handle:
         pkl.dump(data, handle, protocol=pkl.HIGHEST_PROTOCOL)
 
+
+def process_fb15_237():
+    def filter(raw_list):
+        num_dict = defaultdict(int)
+        for item in raw_list:
+            num_dict[item] += 1
+        sort_dict = sorted([[key, num_dict[key]] for key in num_dict], key=lambda x:x[1])
+        top_dict = sort_dict[-51:-1]
+        # print(top_dict)
+        return [each[0] for each in top_dict]
+
+    def reorder(raw_list):
+        order_dict = {}
+        order = 0
+        for item in raw_list:
+            if item not in order_dict:
+                order_dict[item] = order
+                order += 1
+        return order_dict
+
+    data = {}
+    KG = []
+    for term in ["train", "valid", "test"]:
+        with open("class/FB15k/freebase_mtr100_mte100-{}.txt".format(term), "r") as rf:
+            for line in rf.readlines():
+                line = line.strip().split("\t")
+                KG.append(line)
+    ent = [i[0] for i in KG] + [i[2] for i in KG]
+    rel = [i[1] for i in KG]
+    ent_order = reorder(ent)
+    rel_order = reorder(rel)
+    new_KG = [[ent_order[i[0]],rel_order[i[1]],ent_order[i[2]]] for i in KG]
+    # data["A"] = new_KG
+
+    ent_labels = []
+    labels = []
+    with open("class/FB15k/entity2type.txt", "r") as rf:
+        for line in rf.readlines():
+            line = line.strip().split("\t")
+            ent_labels.append(line)
+            labels += line[1:]
+    labels = filter(labels)
+    label_order = reorder(labels)
+    new_ent_labels = []
+    for each in ent_labels:
+        each_label = []
+        # print(each)
+        for label in each[1:]:
+            # print(label)
+            if label in label_order:
+                new_ent_labels.append([ent_order[each[0]], label_order[label]])
+    data = np.array([1. for i in new_ent_labels])
+    row = np.array([i[0] for i in new_ent_labels])
+    col = np.array([i[1] for i in new_ent_labels])
+    y = csr_matrix((data, (row, col)), shape=(len(ent_order), len(label_order)))
+    # data["y"] = y
+
+    train, test = [], []
+    with open("class/FB15k/train.txt", "r") as rf:
+        for line in rf.readlines():
+            line = line.strip()
+            train.append(ent_order[line])
+    with open("class/FB15k/test.txt", "r") as rf:
+        for line in rf.readlines():
+            line = line.strip()
+            test.append(ent_order[line])
+    # data['train_idx'] = train
+    # data['test_idx'] = test
+    # data["e"] = len(ent_order)
+    # print(train[:10])
+    # print(test[:10])
+    data = {'A': new_KG,
+            'y': y,
+            'train_idx': train,
+            'test_idx': test,
+            "e": len(ent_order)
+            }
+    with open('class/fb15kpro.pickle', 'wb') as handle:
+        pkl.dump(data, handle, protocol=pkl.HIGHEST_PROTOCOL)
+
 if __name__ == '__main__':
     dataset = sys.argv[1]
-    align_relation(dataset)
-    # process_fb()
+    # align_relation(dataset)
+    process_fb()
     # process_wn()

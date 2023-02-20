@@ -91,7 +91,7 @@ class Model(object):
 class AutoRGCN_Align(Model):
     def __init__(self, placeholders, input_dim, hidden_dim, output_dim, train_labels, dataset, REL=None,
                  mode="None", embed="random", alpha=0.5, beta=0.5, layer_num=0, sparse_inputs=False,
-                 featureless=True, rel_align_loss=False, names_neg=None, **kwargs):
+                 featureless=True, rel_align_loss=False, basis_decomp=False, num_bases=-1, names_neg=None, **kwargs):
         super(AutoRGCN_Align, self).__init__(**kwargs)
 
         print("####### Model: AutoRGCN_Align #########")
@@ -114,6 +114,8 @@ class AutoRGCN_Align(Model):
         self.layer_num = layer_num
         self.dataset = dataset
         self.names_neg = names_neg
+        self.basis_decomp = basis_decomp
+        self.num_bases = num_bases
 
         if FLAGS.optim == "GD":
             self.optimizer = tf.train.GradientDescentOptimizer(learning_rate=FLAGS.learning_rate)
@@ -202,8 +204,10 @@ class AutoRGCN_Align(Model):
                                             beta=self.beta,
                                             mode=self.mode,
                                             bias=False,
+                                            basis_decomp=self.basis_decomp,
+                                            num_bases= self.num_bases, 
                                             transform=False,
-                                            init=[trunc_normal, trunc_normal],
+                                            init=[trunc_normal, trunc_normal, trunc_normal],
                                             logging=self.logging))
 
         for i in range(self.layer_num):
@@ -216,8 +220,10 @@ class AutoRGCN_Align(Model):
                                                 beta=self.beta,
                                                 mode=self.mode,
                                                 bias=False,
+                                                basis_decomp=self.basis_decomp,
+                                                num_bases= self.num_bases,
                                                 transform=False,
-                                                init=[trunc_normal, trunc_normal],
+                                                init=[trunc_normal, trunc_normal, trunc_normal],
                                                 logging=self.logging))
 
         self.layers.append(AutoRelGraphConvolution(input_dim=self.hidden_dim,
@@ -229,8 +235,10 @@ class AutoRGCN_Align(Model):
                                             beta=self.beta,
                                             mode=self.mode,
                                             bias=False,
+                                            basis_decomp=self.basis_decomp,
+                                            num_bases= self.num_bases,
                                             transform=False,
-                                            init=[trunc_normal, trunc_normal],
+                                            init=[trunc_normal, trunc_normal, trunc_normal],
                                             logging=self.logging))
 
         for layer in self.layers:
@@ -263,8 +271,10 @@ class AutoRGCN_Align(Model):
                                             beta=self.beta,
                                             mode=self.mode,
                                             bias=False,
+                                            basis_decomp=self.basis_decomp,
+                                            num_bases= self.num_bases,
                                             transform=False,
-                                            init=[glorot, glorot],
+                                            init=[glorot, glorot, glorot],
                                             logging=self.logging))
 
         for i in range(self.layer_num):
@@ -277,8 +287,10 @@ class AutoRGCN_Align(Model):
                                                 beta=self.beta,
                                                 mode=self.mode,
                                                 bias=False,
+                                                basis_decomp=self.basis_decomp,
+                                                num_bases= self.num_bases,
                                                 transform=False,
-                                                init=[glorot, glorot],
+                                                init=[glorot, glorot, glorot],
                                                 logging=self.logging))
 
         self.layers.append(AutoRelGraphConvolution(input_dim=self.hidden_dim,
@@ -290,10 +302,22 @@ class AutoRGCN_Align(Model):
                                             beta=self.beta,
                                             mode=self.mode,
                                             bias=False,
+                                            basis_decomp=self.basis_decomp,
+                                            num_bases= self.num_bases,
                                             transform=True,
                                             truncate_ent=True,
-                                            init=[glorot, glorot],
+                                            init=[glorot, glorot, glorot],
                                             logging=self.logging))
 
         for layer in self.layers:
             layer.rel_update = self.rel_update
+
+    def load_state_dict(self, weight_basis):
+        """
+        For Basis Decomposition, updates the parameters of the weights
+
+        """
+        for i, layer in enumerate(self.layers):
+            layer.update_with_basis(weight_basis)
+        
+

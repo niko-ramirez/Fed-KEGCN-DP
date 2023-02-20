@@ -1,5 +1,6 @@
 from inits import *
 import tensorflow as tf
+import numpy as np
 import sys
 
 flags = tf.app.flags
@@ -119,7 +120,7 @@ class InitLayer(Layer):
 
     def __init__(self, input_dim, output_dim, placeholders,
                  sparse_inputs=False, embed=None, dataset=None,
-                 featureless=False, init=[glorot, glorot], **kwargs):
+                 featureless=False, init=[glorot, glorot, glorot], **kwargs):
         super(InitLayer, self).__init__(**kwargs)
 
         self.support = placeholders['support']
@@ -179,8 +180,8 @@ class AutoRelGraphConvolution(Layer):
     '''
 
     def __init__(self, input_dim, output_dim, placeholders, dropout=0., alpha=0.5, beta=None, mode="None",
-                 sparse_inputs=False, act=tf.nn.relu, bias=False, dataset=None, embed=None,
-                 featureless=True, transform=False, attention=False, init=[glorot, glorot],
+                 sparse_inputs=False, act=tf.nn.relu, bias=False, basis_decomp = False, num_bases = -1, dataset=None, embed=None,
+                 featureless=True, transform=False, attention=False, init=[glorot, glorot, glorot],
                  rel_update=True, truncate_ent=False, **kwargs):
         super(AutoRelGraphConvolution, self).__init__(**kwargs)
 
@@ -200,6 +201,9 @@ class AutoRelGraphConvolution(Layer):
         self.output_dim_ent, self.output_dim_rel = output_dim
         self.mode = mode # None, TransE
         self.alpha = alpha
+        self.basis_decomp = basis_decomp
+        self.num_bases = num_bases
+        self.num_rel = input_dim[-1]
         if beta is None:
             self.beta = alpha
         else:
@@ -216,14 +220,25 @@ class AutoRelGraphConvolution(Layer):
         with tf.variable_scope(self.name + '_vars'):
             # vars: embedding of nodes
             for i in range(len(self.support)):
-                if self.transform:
+                if self.basis_decomp:
+                    self.vars['ent_coeffs_' + str(i)] = init[2]([self.num_rel, self.num_bases],
+                                                                name='ent_coeffs_' + str(i))
+                    self.loss += tf.nn.l2_loss(self.vars['ent_coeffs_' + str(i)])
+
+                    self.vars['ent_weights_' + str(i)] = init[0]([self.num_bases, self.input_dim_ent, self.output_dim_ent],
+                                                            name='ent_weights_' + str(i))
+                    self.loss += tf.nn.l2_loss(self.vars['ent_weights_' + str(i)])
+
+                elif self.transform:
                     self.vars['ent_weights_' + str(i)] = init[0]([self.input_dim_ent, self.output_dim_ent],
                                                             name='ent_weights_' + str(i))
                     self.loss += tf.nn.l2_loss(self.vars['ent_weights_' + str(i)])
+                
 
             if self.bias:
                 self.vars['ent_bias'] = zeros([self.output_dim_ent], name='ent_bias')
                 self.vars['rel_bias'] = zeros([self.output_dim_rel], name='rel_bias')
+            
 
         if self.highway:
             self.kernel_gate_ent = glorot([self.output_dim_ent, self.output_dim_ent])
@@ -305,9 +320,13 @@ class AutoRelGraphConvolution(Layer):
                 pre_rel = tf.reshape(pre_rel, rel_shape)
 
             ent_invsum, rel_invsum, nei_array = self.support[i]
+            print ("ENT INVSUM SHAPE: ", ent_invsum.shape)
             ent_message, rel_message, loss = self._message(pre_ent, pre_rel, nei_array, self.mode)
 
+            print ("ENT MESSAGE SHAPE: ", ent_invsum.shape)
+
             ent_update = ent_invsum * ent_message
+            print ("ENT UPDATE SHAPE: ", ent_update.shape)
             ent_support = pre_ent + self.alpha * ent_update
 
             if rel_message is not None:
@@ -316,7 +335,25 @@ class AutoRelGraphConvolution(Layer):
             else:
                 rel_support = pre_rel
 
-            if self.transform:
+
+            if self.basis_decomp:
+                if self.truncate_ent and self.mode == "TransD":
+                    ent_dim = tf.cast(tf.shape(ent_support)[1]/2, tf.int32)
+                    basis = tf.reshape(self.vars['ent_weights_' + str(i)][:ent_dim], (self.input_dim_ent, self.num_bases, self.output_dim_ent))
+                    weights = tf.matmul(self.vars['ent_coeffs_' + str(i)][:ent_dim], basis)
+                    weights = tf.reshape(weights, (self.num_rel, self.input_dim_ent, self.output_dim_ent))
+                    ent_support = dot(ent_support[:, :ent_dim], weights)
+                else:
+                    basis = tf.reshape(self.vars['ent_weights_' + str(i)], (self.input_dim_ent, self.num_bases, self.output_dim_ent))
+                    weights = tf.matmul(self.vars['ent_coeffs_' + str(i)], basis)
+                    weights = tf.reshape(weights, (self.num_rel, self.input_dim_ent, self.output_dim_ent))
+                    weights = tf.reduce_sum(weights, axis = 1)
+                    
+                    ent_support = dot(ent_support, weights)
+
+
+
+            elif self.transform:
                 if self.truncate_ent and self.mode == "TransD":
                     ent_dim = tf.cast(tf.shape(ent_support)[1]/2, tf.int32)
                     ent_support = dot(ent_support[:, :ent_dim], self.vars['ent_weights_' + str(i)][:ent_dim])
@@ -341,3 +378,12 @@ class AutoRelGraphConvolution(Layer):
             output_rel = tf.math.l2_normalize(output_rel, axis=1)
 
         return output_ent, output_rel
+
+    def update_with_basis(self, weight_basis):
+        """
+        Updates layer parameters with the new basis
+
+        """
+        for i in range(len(self.support)):
+            if self.transform:
+                self.vars['ent_weights_' + str(i)]

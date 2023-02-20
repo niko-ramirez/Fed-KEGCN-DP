@@ -65,9 +65,13 @@ logging.getLogger().setLevel(logging.INFO)
 
 # Load data
 adj, num_ent, train, test, valid, y = load_data_class(FLAGS)
+
+print (train[0:])
+
 train = [train, y]
 rel_num = np.max(adj[2][:, 1]) + 1
 print("Relation num: ", rel_num)
+logging.info(f"Model Variables: {rel_num}")
 
 # process graph to fit into later computation
 support = [preprocess_adj(adj)]
@@ -107,7 +111,7 @@ elif FLAGS.mode == "TransD":
 model = model_func(placeholders, input_dim, hidden_dim, output_dim, dataset=FLAGS.dataset,
                     train_labels=train, mode=FLAGS.mode, embed=FLAGS.embed, alpha=FLAGS.alpha,
                     beta=FLAGS.beta, layer_num=FLAGS.layer, sparse_inputs=False, featureless=True,
-                    logging=True, rel_update=FLAGS.rel_update, task=task)
+                    logging=True, rel_update=FLAGS.rel_update, basis_decomp=True, num_bases = 25, task=task)
 
 sess = tf.Session()
 sess.run(tf.global_variables_initializer())
